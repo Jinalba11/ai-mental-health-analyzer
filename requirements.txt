@@ -1,0 +1,6 @@
+flask
+streamlit
+pandas
+requests
+psycopg2-binary
+scikit-learn

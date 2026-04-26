@@ -1,107 +1,114 @@
 from flask import Flask, request, jsonify
-import pickle
-import re
-import nltk
-import os
-import psycopg2
-import atexit
-
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-
-# Download required nltk data
-nltk.download('stopwords')
-nltk.download('wordnet')
+import pickle, os
+from backend.db import get_connection
 
 app = Flask(__name__)
 
-# Dynamic path
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-model_path = os.path.join(base_dir, 'models', 'model.pkl')
-vectorizer_path = os.path.join(base_dir, 'models', 'vectorizer.pkl')
+model = pickle.load(open(os.path.join(BASE_DIR, 'models/model.pkl'), 'rb'))
+vectorizer = pickle.load(open(os.path.join(BASE_DIR, 'models/vectorizer.pkl'), 'rb'))
 
-model = pickle.load(open(model_path, 'rb'))
-vectorizer = pickle.load(open(vectorizer_path, 'rb'))
+suggestions = {
+    "sadness": "Try talking to a friend 💬",
+    "anger": "Take a deep breath 🧘",
+    "joy": "Keep smiling 😊",
+    "fear": "You are safe 💙",
+    "love": "Spread kindness ❤️",
+    "surprise": "Take it easy 😮"
+}
 
-# Database connection
-conn = psycopg2.connect(
-    host="localhost",
-    database="mental_health_db",
-    user="postgres",
-    password="Jinalba@2811"
-)
-cursor = conn.cursor()
-
-# NLP preprocessing
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
-
-def clean_text(text):
-    text = text.lower()
-    text = re.sub(r'[^a-zA-Z]', ' ', text)
-    words = text.split()
-    words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
-    return " ".join(words)
-
-# ---------------- PREDICT ----------------
-@app.route('/predict', methods=['POST'])
-def predict():
-    data = request.get_json()
-
-    if not data or 'text' not in data:
-        return jsonify({'error': 'No text provided'}), 400
-
-    text = data['text']
-
-    cleaned = clean_text(text)
-    vectorized = vectorizer.transform([cleaned])
-    prediction = model.predict(vectorized)[0]
-
-    cursor.execute(
-        "INSERT INTO entries (text, emotion) VALUES (%s, %s)",
-        (text, prediction)
-    )
-    conn.commit()
-
-    return jsonify({'emotion': prediction})
-
-# ---------------- HISTORY ----------------
-@app.route('/history', methods=['GET'])
-def history():
-    cursor.execute("SELECT * FROM entries ORDER BY created_at DESC")
-    rows = cursor.fetchall()
-
-    data = []
-    for row in rows:
-        data.append({
-            "id": row[0],
-            "text": row[1],
-            "emotion": row[2],
-            "created_at": row[3]
-        })
-
-    return jsonify(data)
-
-# ---------------- CLEAR HISTORY ----------------
-@app.route('/clear', methods=['DELETE'])
-def clear():
-    cursor.execute("DELETE FROM entries")
-    conn.commit()
-    return jsonify({"message": "History cleared successfully"})
-
-# Home
 @app.route('/')
 def home():
-    return "API is running 🚀"
+    return "Backend running 🚀"
 
-# Close DB
-def close_connection():
-    cursor.close()
+
+# LOGIN
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM users WHERE username=%s AND password=%s",
+                (data["username"], data["password"]))
+
+    user = cur.fetchone()
     conn.close()
 
-atexit.register(close_connection)
+    if user:
+        return jsonify({"user_id": user[0]})
+    return jsonify({"error": "Invalid credentials"})
 
-# Run
-if __name__ == '__main__':
+
+# REGISTER
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("INSERT INTO users (username, password) VALUES (%s,%s)",
+                    (data["username"], data["password"]))
+        conn.commit()
+        return jsonify({"message": "User created"})
+    except:
+        conn.rollback()
+        return jsonify({"error": "User exists"})
+
+
+# PREDICT
+@app.route('/predict', methods=['POST'])
+def predict():
+    data = request.json
+
+    text = data.get("text")
+    user_id = data.get("user_id")
+
+    if not text or not user_id:
+        return jsonify({"error": "Missing data"})
+
+    vec = vectorizer.transform([text])
+    pred = model.predict(vec)[0]
+    prob = model.predict_proba(vec)[0].max()
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO entries (user_id, text, emotion) VALUES (%s,%s,%s)",
+        (user_id, text, pred)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "emotion": pred,
+        "confidence": round(prob * 100, 2),
+        "suggestion": suggestions.get(pred, "")
+    })
+
+
+# ANALYTICS (🔥 FIXED)
+@app.route('/analytics', methods=['GET'])
+def analytics():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT emotion, created_at FROM entries ORDER BY created_at")
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return jsonify([
+        {"emotion": r[0], "time": r[1].isoformat()}
+        for r in rows
+    ])
+
+
+if __name__ == "__main__":
     app.run(debug=True)
